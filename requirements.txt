@@ -6,7 +6,6 @@ pytorchvideo
 ffmpeg-python
 augly
 h5py
-numpy
 pandas
 tqdm
 opencv-python
