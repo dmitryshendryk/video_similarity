@@ -93,7 +93,7 @@ def run_search_pipeline(
     """Full two-stage search: vector search + ViSiL re-ranking with timing."""
     t0 = time.perf_counter()
 
-    video_tensor = load_video_tensor(video_path)
+    video_tensor = load_video_tensor(video_path, keyframes_only=True)
     if video_tensor.shape[0] == 0:
         raise ValueError("Could not extract frames")
     t_decode = time.perf_counter() - t0

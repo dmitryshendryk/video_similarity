@@ -164,26 +164,42 @@ def discover_videos(dataset_path: Path, pattern: str) -> list[tuple[str, Path]]:
 
 
 def load_video_tensor(
-    video_path: Path, fps: int = 1, resize: int = 256, crop: int = 224
+    video_path: Path,
+    fps: int = 1,
+    resize: int = 256,
+    crop: int = 224,
+    keyframes_only: bool = False,
+    max_frames: int = 60,
 ) -> torch.Tensor:
     """Load a video file as a tensor of frames.
 
     Args:
         video_path: Path to the video file.
-        fps: Frames per second to sample.
+        fps: Frames per second to sample (ignored when keyframes_only=True).
         resize: Resize dimension.
         crop: Center crop dimension.
+        keyframes_only: If True, extract only I-frames instead of uniform fps
+            sampling.  Falls back to fps=1 if zero I-frames are found.
+        max_frames: Maximum number of frames to return.
 
     Returns:
-        Tensor of shape (T, C, H, W).
+        Tensor of shape (T, H, W, C) as uint8.
     """
     from utils import load_video_ffmpeg
 
-    video_tensor = load_video_ffmpeg(str(video_path), fps=fps, crop=crop, resize=resize)
-    if video_tensor is None or (
-        isinstance(video_tensor, torch.Tensor) and video_tensor.shape[0] == 0
+    effective_fps = None if keyframes_only else fps
+    video_array = load_video_ffmpeg(
+        str(video_path),
+        fps=effective_fps,
+        crop=crop,
+        resize=resize,
+        keyframes_only=keyframes_only,
+        max_frames=max_frames,
+    )
+    if video_array is None or (
+        isinstance(video_array, np.ndarray) and video_array.shape[0] == 0
     ):
         return torch.empty(0)
-    if not isinstance(video_tensor, torch.Tensor):
-        video_tensor = torch.from_numpy(np.array(video_tensor))
-    return video_tensor
+    if isinstance(video_array, np.ndarray):
+        return torch.from_numpy(video_array)
+    return video_array
