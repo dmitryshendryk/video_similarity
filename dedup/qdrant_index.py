@@ -10,11 +10,14 @@ Alternative to the FAISS-based VideoIndex. Qdrant provides:
 Requires: pip install qdrant-client
 """
 
+import logging
 import uuid
 
 import numpy as np
 
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 try:
     from qdrant_client import QdrantClient
@@ -32,6 +35,23 @@ try:
     _QDRANT_AVAILABLE = True
 except ImportError:
     _QDRANT_AVAILABLE = False
+
+try:
+    from qdrant_client.models import (
+        BinaryQuantization,
+        BinaryQuantizationConfig,
+        QuantizationSearchParams,
+        SearchParams,
+    )
+
+    _QDRANT_BQ_AVAILABLE = True
+except ImportError:
+    _QDRANT_BQ_AVAILABLE = False
+    logger.warning(
+        "qdrant-client does not support BinaryQuantization — "
+        "binary_quantization option will be silently ignored. "
+        "Upgrade with: pip install --upgrade qdrant-client"
+    )
 
 
 MetadataValue = str | int | float | bool | None
@@ -52,6 +72,7 @@ class QdrantIndex:
         collection_name: str = "video_dedup",
         url: str | None = None,
         path: str | None = None,
+        binary_quantization: bool = False,
     ) -> None:
         if not _QDRANT_AVAILABLE:
             raise ImportError(
@@ -61,6 +82,7 @@ class QdrantIndex:
 
         self._dim = dim
         self._collection_name = collection_name
+        self._binary_quantization = binary_quantization
 
         if url is not None:
             self._client = QdrantClient(url=url)
@@ -77,12 +99,18 @@ class QdrantIndex:
         collections = self._client.get_collections().collections
         existing = [c.name for c in collections]
         if self._collection_name not in existing:
+            quantization_config = (
+                BinaryQuantization(binary=BinaryQuantizationConfig(always_ram=True))
+                if self._binary_quantization and _QDRANT_BQ_AVAILABLE
+                else None
+            )
             self._client.create_collection(
                 collection_name=self._collection_name,
                 vectors_config=VectorParams(
                     size=self._dim,
                     distance=Distance.COSINE,
                 ),
+                quantization_config=quantization_config,
             )
             self._client.create_payload_index(
                 collection_name=self._collection_name,
@@ -97,6 +125,11 @@ class QdrantIndex:
             self._client.create_payload_index(
                 collection_name=self._collection_name,
                 field_name="aspect_ratio",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+            self._client.create_payload_index(
+                collection_name=self._collection_name,
+                field_name="phash",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
 
@@ -208,12 +241,23 @@ class QdrantIndex:
         Returns:
             List of (video_id, score) tuples sorted by descending similarity.
         """
+        search_params = (
+            SearchParams(
+                quantization=QuantizationSearchParams(
+                    rescore=True,
+                    oversampling=1.5,
+                )
+            )
+            if self._binary_quantization and _QDRANT_BQ_AVAILABLE
+            else None
+        )
         results = self._client.query_points(
             collection_name=self._collection_name,
             query=query.flatten().tolist(),
             query_filter=query_filter,
             limit=top_k,
             with_payload=True,
+            search_params=search_params,
         )
         output: list[tuple[str, float]] = []
         for point in results.points:
@@ -332,6 +376,7 @@ class QdrantIndex:
         path: str | Path,
         collection_name: str = "video_dedup",
         url: str | None = None,
+        binary_quantization: bool = False,
     ) -> "QdrantIndex":
         """Connect to an existing Qdrant collection.
 
@@ -342,14 +387,24 @@ class QdrantIndex:
             path: Path to the local Qdrant data directory.
             collection_name: Name of the collection.
             url: URL of the remote Qdrant server (overrides path).
+            binary_quantization: Whether binary quantization is active on this
+                collection. Used to enable rescoring search params consistently.
 
         Returns:
             QdrantIndex connected to the existing collection.
         """
         if url is not None:
-            idx = cls(url=url, collection_name=collection_name)
+            idx = cls(
+                url=url,
+                collection_name=collection_name,
+                binary_quantization=binary_quantization,
+            )
         else:
-            idx = cls(path=str(path), collection_name=collection_name)
+            idx = cls(
+                path=str(path),
+                collection_name=collection_name,
+                binary_quantization=binary_quantization,
+            )
 
         # Read dim from existing collection config
         info = idx._client.get_collection(collection_name)

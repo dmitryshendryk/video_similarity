@@ -30,6 +30,7 @@ index: VideoIndex | QdrantIndex = (
         index_path,
         qdrant_url=str(config["qdrant_url"]) if config.get("qdrant_url") else None,
         collection_name=str(config.get("collection_name", "video_dedup")),
+        binary_quantization=bool(config.get("qdrant_binary_quantization", False)),
     )
     if (
         index_path.with_suffix(".faiss").exists()
@@ -41,6 +42,7 @@ index: VideoIndex | QdrantIndex = (
         index_path,
         qdrant_url=str(config["qdrant_url"]) if config.get("qdrant_url") else None,
         collection_name=str(config.get("collection_name", "video_dedup")),
+        binary_quantization=bool(config.get("qdrant_binary_quantization", False)),
     )
 )
 

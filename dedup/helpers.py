@@ -22,6 +22,7 @@ def create_index(
     index_path: Path,
     qdrant_url: str | None = None,
     collection_name: str = "video_dedup",
+    binary_quantization: bool = False,
 ) -> VideoIndex | QdrantIndex:
     """Create a new index based on the selected backend.
 
@@ -31,15 +32,25 @@ def create_index(
         index_path: Base path for file-based persistence.
         qdrant_url: Qdrant server URL (remote mode). If None, uses local on-disk mode.
         collection_name: Qdrant collection name.
+        binary_quantization: Enable binary quantization on new Qdrant collections.
+            Default False. Only recommended when the collection will exceed 50K vectors.
 
     Returns:
         New index instance.
     """
     if index_backend == "qdrant":
         if qdrant_url is not None:
-            return QdrantIndex(dim=dim, url=qdrant_url, collection_name=collection_name)
+            return QdrantIndex(
+                dim=dim,
+                url=qdrant_url,
+                collection_name=collection_name,
+                binary_quantization=binary_quantization,
+            )
         return QdrantIndex(
-            dim=dim, path=str(index_path) + "_qdrant", collection_name=collection_name
+            dim=dim,
+            path=str(index_path) + "_qdrant",
+            collection_name=collection_name,
+            binary_quantization=binary_quantization,
         )
     return VideoIndex(dim=dim)
 
@@ -49,6 +60,7 @@ def load_index(
     index_path: Path,
     qdrant_url: str | None = None,
     collection_name: str = "video_dedup",
+    binary_quantization: bool = False,
 ) -> VideoIndex | QdrantIndex:
     """Load an existing index based on the selected backend.
 
@@ -57,6 +69,8 @@ def load_index(
         index_path: Base path for file-based persistence.
         qdrant_url: Qdrant server URL (remote mode). If None, uses local on-disk mode.
         collection_name: Qdrant collection name.
+        binary_quantization: Whether binary quantization was enabled on this collection.
+            Used to set search parameters consistently with collection creation.
 
     Returns:
         Loaded index instance.
@@ -64,10 +78,15 @@ def load_index(
     if index_backend == "qdrant":
         if qdrant_url is not None:
             return QdrantIndex.load(
-                path=index_path, url=qdrant_url, collection_name=collection_name
+                path=index_path,
+                url=qdrant_url,
+                collection_name=collection_name,
+                binary_quantization=binary_quantization,
             )
         return QdrantIndex.load(
-            path=str(index_path) + "_qdrant", collection_name=collection_name
+            path=str(index_path) + "_qdrant",
+            collection_name=collection_name,
+            binary_quantization=binary_quantization,
         )
     return VideoIndex.load(index_path)
 
