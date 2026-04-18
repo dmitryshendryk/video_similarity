@@ -5,17 +5,62 @@ Extracts a single compact descriptor (512-D) per video for FAISS indexing.
 Two backends: S2VS (default, reuses existing model) and CLIP (optional).
 """
 
+import logging
+import time
 import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 from model.feature_extractor import FeatureExtractor
 from model.similarity_network import SimilarityNetwork
 from model.pooling import gem
+
+try:
+    from optimum.quanto import freeze, qint8, quantize as quanto_quantize
+
+    _QUANTO_AVAILABLE = True
+except ImportError:
+    _QUANTO_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _QuantizeResult:
+    """Result of an INT8 quantization attempt."""
+
+    model: nn.Module
+    success: bool
+
+
+def _quantize_with_quanto(model: nn.Module) -> _QuantizeResult:
+    """Attempt INT8 weight quantization via optimum-quanto.
+
+    Args:
+        model: PyTorch module to quantize in-place.
+
+    Returns:
+        _QuantizeResult with the (possibly quantized) model and a success flag.
+        On failure returns the original unmodified model with success=False.
+    """
+    if not _QUANTO_AVAILABLE:
+        logger.warning(
+            "optimum-quanto not installed; skipping INT8 quantization. "
+            "Install with: pip install optimum-quanto"
+        )
+        return _QuantizeResult(model=model, success=False)
+    try:
+        quanto_quantize(model, weights=qint8)
+        freeze(model)
+        return _QuantizeResult(model=model, success=True)
+    except Exception as exc:
+        logger.warning("quanto quantization failed, using FP32: %s", exc)
+        return _QuantizeResult(model=model, success=False)
 
 
 class EmbeddingBackend(ABC):
@@ -70,12 +115,41 @@ class S2VSBackend(EmbeddingBackend):
         dims: int = 512,
         device: str = "cuda",
         batch_sz: int = 256,
+        compile_model: bool = True,
+        quantize_model: bool = False,
     ) -> None:
         self._dims = dims
         self._device = device
         self._batch_sz = batch_sz
-        self._feat_extractor = feat_extractor
         self._attention = attention
+
+        if quantize_model:
+            result = _quantize_with_quanto(feat_extractor)
+            feat_extractor = result.model
+
+        if compile_model:
+            try:
+                feat_extractor = torch.compile(feat_extractor, mode="reduce-overhead")
+            except Exception as exc:
+                logger.warning("torch.compile failed, using eager mode: %s", exc)
+
+        self._feat_extractor = feat_extractor
+        self._warmup()
+
+    def _warmup(self) -> None:
+        """Run a dummy forward pass to trigger JIT compilation at boot."""
+        t0 = time.monotonic()
+        try:
+            dummy = torch.randint(0, 256, (4, 224, 224, 3), dtype=torch.uint8).to(
+                self._device
+            )
+            with torch.no_grad():
+                self._feat_extractor(dummy)
+            logger.info("Model warmup completed in %.2fs", time.monotonic() - t0)
+        except Exception as exc:
+            logger.warning(
+                "Model warmup failed, will warm up on first request: %s", exc
+            )
 
     @classmethod
     def from_pretrained(
@@ -84,6 +158,8 @@ class S2VSBackend(EmbeddingBackend):
         dims: int = 512,
         device: str = "cuda",
         batch_sz: int = 256,
+        compile_model: bool = True,
+        quantize_model: bool = False,
     ) -> "S2VSBackend":
         """Load from a saved ViSiL checkpoint file.
 
@@ -92,6 +168,8 @@ class S2VSBackend(EmbeddingBackend):
             dims: Feature dimensionality.
             device: Torch device string.
             batch_sz: Batch size for frame processing.
+            compile_model: Attempt torch.compile on the feature extractor.
+            quantize_model: Attempt INT8 quantization via optimum-quanto.
 
         Returns:
             Configured S2VSBackend instance.
@@ -113,6 +191,8 @@ class S2VSBackend(EmbeddingBackend):
             dims=dims,
             device=device,
             batch_sz=batch_sz,
+            compile_model=compile_model,
+            quantize_model=quantize_model,
         )
 
     @classmethod
@@ -122,6 +202,8 @@ class S2VSBackend(EmbeddingBackend):
         dims: int = 512,
         device: str = "cuda",
         batch_sz: int = 256,
+        compile_model: bool = True,
+        quantize_model: bool = False,
     ) -> "S2VSBackend":
         """Load using pretrained weights from PyTorch Hub.
 
@@ -130,6 +212,8 @@ class S2VSBackend(EmbeddingBackend):
             dims: Feature dimensionality.
             device: Torch device string.
             batch_sz: Batch size for frame processing.
+            compile_model: Attempt torch.compile on the feature extractor.
+            quantize_model: Attempt INT8 quantization via optimum-quanto.
 
         Returns:
             Configured S2VSBackend instance.
@@ -151,6 +235,8 @@ class S2VSBackend(EmbeddingBackend):
             dims=dims,
             device=device,
             batch_sz=batch_sz,
+            compile_model=compile_model,
+            quantize_model=quantize_model,
         )
 
     @property
