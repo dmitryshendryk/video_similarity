@@ -17,8 +17,12 @@ import numpy as np
 
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from dedup.qdrant_index._imports import (
+    _QDRANT_AVAILABLE,
+    _QDRANT_BQ_AVAILABLE,
+)
 
+# These names are conditionally available; referenced via string guards below.
 try:
     from qdrant_client import QdrantClient
     from qdrant_client.models import (
@@ -28,13 +32,10 @@ try:
         MatchValue,
         PayloadSchemaType,
         PointStruct,
-        Range,
         VectorParams,
     )
-
-    _QDRANT_AVAILABLE = True
 except ImportError:
-    _QDRANT_AVAILABLE = False
+    pass
 
 try:
     from qdrant_client.models import (
@@ -43,16 +44,10 @@ try:
         QuantizationSearchParams,
         SearchParams,
     )
-
-    _QDRANT_BQ_AVAILABLE = True
 except ImportError:
-    _QDRANT_BQ_AVAILABLE = False
-    logger.warning(
-        "qdrant-client does not support BinaryQuantization — "
-        "binary_quantization option will be silently ignored. "
-        "Upgrade with: pip install --upgrade qdrant-client"
-    )
+    pass
 
+logger = logging.getLogger(__name__)
 
 MetadataValue = str | int | float | bool | None
 MetadataDict = dict[str, MetadataValue]
@@ -112,36 +107,22 @@ class QdrantIndex:
                 ),
                 quantization_config=quantization_config,
             )
-            self._client.create_payload_index(
-                collection_name=self._collection_name,
-                field_name="video_id",
-                field_schema=PayloadSchemaType.KEYWORD,
-            )
-            self._client.create_payload_index(
-                collection_name=self._collection_name,
-                field_name="duration_bucket",
-                field_schema=PayloadSchemaType.KEYWORD,
-            )
-            self._client.create_payload_index(
-                collection_name=self._collection_name,
-                field_name="aspect_ratio",
-                field_schema=PayloadSchemaType.KEYWORD,
-            )
-            self._client.create_payload_index(
-                collection_name=self._collection_name,
-                field_name="phash",
-                field_schema=PayloadSchemaType.KEYWORD,
-            )
+            for field, schema in [
+                ("video_id", PayloadSchemaType.KEYWORD),
+                ("duration_bucket", PayloadSchemaType.KEYWORD),
+                ("aspect_ratio", PayloadSchemaType.KEYWORD),
+                ("phash", PayloadSchemaType.KEYWORD),
+            ]:
+                self._client.create_payload_index(
+                    collection_name=self._collection_name,
+                    field_name=field,
+                    field_schema=schema,
+                )
 
-    def _video_id_filter(self, video_id: str) -> Filter:
+    def _video_id_filter(self, video_id: str) -> "Filter":
         """Build a Qdrant filter matching a specific video_id."""
         return Filter(
-            must=[
-                FieldCondition(
-                    key="video_id",
-                    match=MatchValue(value=video_id),
-                )
-            ]
+            must=[FieldCondition(key="video_id", match=MatchValue(value=video_id))]
         )
 
     def _get_point_id(self, video_id: str) -> str | None:
@@ -171,7 +152,6 @@ class QdrantIndex:
             descriptor: L2-normalized vector of shape (dim,).
             metadata: Optional dict of metadata (path, resolution, etc.).
         """
-        # Remove existing point if updating
         existing_id = self._get_point_id(video_id)
         if existing_id is not None:
             self._client.delete(
@@ -188,10 +168,7 @@ class QdrantIndex:
             vector=descriptor.flatten().tolist(),
             payload=payload,
         )
-        self._client.upsert(
-            collection_name=self._collection_name,
-            points=[point],
-        )
+        self._client.upsert(collection_name=self._collection_name, points=[point])
 
     def add_batch(
         self,
@@ -211,7 +188,6 @@ class QdrantIndex:
             payload: dict[str, MetadataValue] = {"video_id": video_id}
             if metadata_list is not None and i < len(metadata_list):
                 payload.update(metadata_list[i])
-
             points.append(
                 PointStruct(
                     id=str(uuid.uuid4()),
@@ -219,11 +195,7 @@ class QdrantIndex:
                     payload=payload,
                 )
             )
-
-        self._client.upsert(
-            collection_name=self._collection_name,
-            points=points,
-        )
+        self._client.upsert(collection_name=self._collection_name, points=points)
 
     def search(
         self,
@@ -243,10 +215,7 @@ class QdrantIndex:
         """
         search_params = (
             SearchParams(
-                quantization=QuantizationSearchParams(
-                    rescore=True,
-                    oversampling=1.5,
-                )
+                quantization=QuantizationSearchParams(rescore=True, oversampling=1.5)
             )
             if self._binary_quantization and _QDRANT_BQ_AVAILABLE
             else None
@@ -357,6 +326,41 @@ class QdrantIndex:
             offset = next_offset
         return video_ids
 
+    def scroll_all_payloads(self, fields: list[str]) -> list[dict[str, MetadataValue]]:
+        """Scroll all points and return the requested payload fields.
+
+        Provides a public alternative to accessing ``_client`` and
+        ``_collection_name`` directly from external callers (e.g. PHashFilter).
+
+        Args:
+            fields: Payload field names to include in each returned dict.
+
+        Returns:
+            List of payload dicts, one per point.  Points without any of the
+            requested fields are still included (with missing keys absent).
+        """
+        payloads: list[dict[str, MetadataValue]] = []
+        offset = None
+        while True:
+            try:
+                results = self._client.scroll(
+                    collection_name=self._collection_name,
+                    limit=100,
+                    offset=offset,
+                    with_payload=fields,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.warning("QdrantIndex.scroll_all_payloads failed: %s", exc)
+                break
+            points, next_offset = results
+            for point in points:
+                payloads.append(dict(point.payload))
+            if next_offset is None:
+                break
+            offset = next_offset
+        return payloads
+
     def save(self, path: str | Path) -> None:
         """Create a snapshot of the collection.
 
@@ -366,9 +370,7 @@ class QdrantIndex:
         Args:
             path: Base path (used for naming the snapshot).
         """
-        self._client.create_snapshot(
-            collection_name=self._collection_name,
-        )
+        self._client.create_snapshot(collection_name=self._collection_name)
 
     @classmethod
     def load(
@@ -406,7 +408,6 @@ class QdrantIndex:
                 binary_quantization=binary_quantization,
             )
 
-        # Read dim from existing collection config
         info = idx._client.get_collection(collection_name)
         vector_config = info.config.params.vectors
         if isinstance(vector_config, VectorParams):

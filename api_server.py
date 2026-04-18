@@ -26,6 +26,7 @@ from dedup.helpers import (
     extract_video_metadata,
     load_video_tensor,
 )
+from dedup.phash_filter import PHashFilter
 from dedup.qdrant_index import QdrantIndex
 from model.video_descriptor import S2VSBackend
 
@@ -102,7 +103,7 @@ def _process_upload(
     if phash_filter is not None:
         try:
             phash_value = phash_filter.compute_phash(str(video_path))
-            metadata["phash"] = str(hex(phash_value))[2:]
+            metadata["phash"] = PHashFilter.serialize_phash(phash_value)
             phash_filter.add(video_id, phash_value)
         except Exception as exc:
             logger.warning("pHash computation failed for %s: %s", video_id, exc)
@@ -113,8 +114,9 @@ def _process_upload(
         raise ValueError("Could not extract frames from video")
 
     if isinstance(embed_backend, S2VSBackend):
-        features, desc = embed_backend.extract_all(video_tensor)
-        save_features(video_id, features)
+        result = embed_backend.extract_all(video_tensor)
+        save_features(video_id, result.frame_features)
+        desc = result.descriptor
     else:
         desc = embed_backend.extract_descriptor(video_tensor)
 

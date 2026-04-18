@@ -199,7 +199,9 @@ def load_video_tensor(
         crop: Center crop dimension.
         keyframes_only: If True, extract only I-frames instead of uniform fps
             sampling.  Falls back to fps=1 if zero I-frames are found.
-        max_frames: Maximum number of frames to return.
+        max_frames: Maximum number of frames to return.  Defaults to 60 so the
+            search pipeline caps output at 60 frames; pass explicitly when
+            calling from training/evaluation code that needs all frames.
 
     Returns:
         Tensor of shape (T, H, W, C) as uint8.

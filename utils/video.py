@@ -25,7 +25,7 @@ def load_video_ffmpeg(
     crop: int | tuple[int, int] | None = None,
     resize: int | tuple[int, int] | None = None,
     keyframes_only: bool = False,
-    max_frames: int = 60,
+    max_frames: int | None = None,
 ) -> np.ndarray:
     """Load a video file into a numpy array using FFmpeg.
 
@@ -44,7 +44,8 @@ def load_video_ffmpeg(
             1 FPS sampling and logs a warning.
         max_frames: Cap on the number of frames returned.  Frames are
             subsampled uniformly when the extracted count exceeds this value.
-            Default 60.
+            ``None`` (default) means no cap — all extracted frames are returned.
+            Pass an explicit integer (e.g. ``max_frames=60``) to enable capping.
 
     Returns:
         numpy.ndarray of shape (T, H, W, 3), dtype uint8.
@@ -124,7 +125,7 @@ def load_video_ffmpeg(
             max_frames=max_frames,
         )
 
-    if result.shape[0] > max_frames:
+    if max_frames is not None and result.shape[0] > max_frames:
         indices = np.linspace(0, result.shape[0] - 1, max_frames, dtype=int)
         result = result[indices]
 

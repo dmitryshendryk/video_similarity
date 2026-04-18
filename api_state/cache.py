@@ -70,7 +70,9 @@ def get_cached_descriptors(
 
     logger.info("Descriptor cache MISS (%s)", fhash[:12])
     if isinstance(embed_backend, S2VSBackend):
-        features, desc = embed_backend.extract_all(video_tensor)
+        result = embed_backend.extract_all(video_tensor)
+        features = result.frame_features
+        desc = result.descriptor
     else:
         features = None
         desc = embed_backend.extract_descriptor(video_tensor)

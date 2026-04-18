@@ -47,8 +47,44 @@ class PHashFilter:
         """Return True if imagehash and Pillow are importable."""
         return _IMAGEHASH_AVAILABLE
 
+    @staticmethod
+    def serialize_phash(value: int) -> str:
+        """Serialize a 64-bit pHash integer to a canonical hex string.
+
+        This is the single authoritative serialization format used when
+        storing pHash values in metadata payloads (Qdrant, JSONStore).
+
+        Args:
+            value: 64-bit integer pHash.
+
+        Returns:
+            Lowercase hex string without '0x' prefix (e.g. ``'a1b2c3d4e5f60718'``).
+        """
+        return hex(value)[2:]
+
+    @staticmethod
+    def deserialize_phash(raw: str) -> int:
+        """Deserialize a hex string back to a 64-bit pHash integer.
+
+        Inverse of :meth:`serialize_phash`.
+
+        Args:
+            raw: Hex string as produced by :meth:`serialize_phash`.
+
+        Returns:
+            64-bit integer pHash.
+
+        Raises:
+            ValueError: If ``raw`` is not a valid hex string.
+        """
+        return int(raw, 16)
+
     def compute_phash(self, video_path: str | Path) -> int:
         """Compute a 64-bit pHash from a representative frame at 10% duration.
+
+        Named ``compute_phash`` (not ``compute_hash``) to distinguish from
+        :class:`~dedup.vpdq_filter.VPDQFilter` which uses ``compute_hash``,
+        avoiding ambiguity when both filters are active in the same pipeline.
 
         Extracts a single frame via FFmpeg/ffprobe at 10 % of the video's
         total duration, converts it to a PIL Image, and returns the integer
@@ -206,32 +242,15 @@ class PHashFilter:
     def _load_from_qdrant(self, idx: QdrantIndex) -> int:
         """Load pHash values from all Qdrant point payloads."""
         loaded = 0
-        offset = None
-        while True:
-            try:
-                results = idx._client.scroll(
-                    collection_name=idx._collection_name,
-                    limit=100,
-                    offset=offset,
-                    with_payload=["video_id", "phash"],
-                    with_vectors=False,
-                )
-            except Exception as exc:
-                logger.warning("PHashFilter Qdrant scroll failed: %s", exc)
-                break
-            points, next_offset = results
-            for point in points:
-                vid = point.payload.get("video_id")
-                phash_raw = point.payload.get("phash")
-                if isinstance(vid, str) and isinstance(phash_raw, str):
-                    try:
-                        self._hashes[vid] = int(phash_raw, 16)
-                        loaded += 1
-                    except ValueError:
-                        pass
-            if next_offset is None:
-                break
-            offset = next_offset
+        for payload in idx.scroll_all_payloads(fields=["video_id", "phash"]):
+            vid = payload.get("video_id")
+            phash_raw = payload.get("phash")
+            if isinstance(vid, str) and isinstance(phash_raw, str):
+                try:
+                    self._hashes[vid] = self.deserialize_phash(phash_raw)
+                    loaded += 1
+                except ValueError:
+                    pass
         return loaded
 
     def _load_from_store(self, store: JSONStore) -> int:
@@ -245,7 +264,7 @@ class PHashFilter:
             phash_raw = record.get("phash")
             if isinstance(phash_raw, str):
                 try:
-                    self._hashes[video_id] = int(phash_raw, 16)
+                    self._hashes[video_id] = self.deserialize_phash(phash_raw)
                     loaded += 1
                 except ValueError:
                     pass

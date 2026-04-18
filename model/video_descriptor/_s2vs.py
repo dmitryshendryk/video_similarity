@@ -1,100 +1,36 @@
-"""
-Pluggable embedding backends for fast video deduplication.
-
-Extracts a single compact descriptor (512-D) per video for FAISS indexing.
-Two backends: S2VS (default, reuses existing model) and CLIP (optional).
-"""
+"""S2VS-based embedding backend — the default pipeline."""
 
 import logging
 import time
-import torch
+
 import numpy as np
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
 
 from model.feature_extractor import FeatureExtractor
-from model.similarity_network import SimilarityNetwork
 from model.pooling import gem
-
-try:
-    from optimum.quanto import freeze, qint8, quantize as quanto_quantize
-
-    _QUANTO_AVAILABLE = True
-except ImportError:
-    _QUANTO_AVAILABLE = False
+from model.similarity_network import SimilarityNetwork
+from model.video_descriptor._base import EmbeddingBackend
+from model.video_descriptor._quantization import _quantize_with_quanto
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class _QuantizeResult:
-    """Result of an INT8 quantization attempt."""
+class VideoFeatures:
+    """Result of a full S2VS forward pass.
 
-    model: nn.Module
-    success: bool
-
-
-def _quantize_with_quanto(model: nn.Module) -> _QuantizeResult:
-    """Attempt INT8 weight quantization via optimum-quanto.
-
-    Args:
-        model: PyTorch module to quantize in-place.
-
-    Returns:
-        _QuantizeResult with the (possibly quantized) model and a success flag.
-        On failure returns the original unmodified model with success=False.
+    Attributes:
+        frame_features: Per-frame region features of shape (T, R, D) on CPU.
+            Needed for ViSiL frame-level re-ranking.
+        descriptor: L2-normalized global descriptor of shape (dim,).
     """
-    if not _QUANTO_AVAILABLE:
-        logger.warning(
-            "optimum-quanto not installed; skipping INT8 quantization. "
-            "Install with: pip install optimum-quanto"
-        )
-        return _QuantizeResult(model=model, success=False)
-    try:
-        quanto_quantize(model, weights=qint8)
-        freeze(model)
-        return _QuantizeResult(model=model, success=True)
-    except Exception as exc:
-        logger.warning("quanto quantization failed, using FP32: %s", exc)
-        return _QuantizeResult(model=model, success=False)
 
-
-class EmbeddingBackend(ABC):
-    """Abstract interface for video embedding backends."""
-
-    @abstractmethod
-    def extract_descriptor(self, video_tensor: torch.Tensor) -> np.ndarray:
-        """Extract a single L2-normalized descriptor from a video tensor.
-
-        Args:
-            video_tensor: Video frames tensor, shape depends on backend.
-
-        Returns:
-            L2-normalized descriptor array of shape (dim,).
-        """
-        ...
-
-    @abstractmethod
-    def extract_batch(self, video_tensors: list[torch.Tensor]) -> np.ndarray:
-        """Extract descriptors for a batch of videos.
-
-        Args:
-            video_tensors: List of video frame tensors.
-
-        Returns:
-            L2-normalized descriptor array of shape (B, dim).
-        """
-        ...
-
-    @property
-    @abstractmethod
-    def dim(self) -> int:
-        """Dimensionality of the output descriptor."""
-        ...
+    frame_features: torch.Tensor
+    descriptor: np.ndarray
 
 
 class S2VSBackend(EmbeddingBackend):
@@ -127,11 +63,15 @@ class S2VSBackend(EmbeddingBackend):
             result = _quantize_with_quanto(feat_extractor)
             feat_extractor = result.model
 
-        if compile_model:
+        if compile_model and not quantize_model:
             try:
                 feat_extractor = torch.compile(feat_extractor, mode="reduce-overhead")
             except Exception as exc:
                 logger.warning("torch.compile failed, using eager mode: %s", exc)
+        elif compile_model:
+            logger.info(
+                "Skipping torch.compile: mutually exclusive with quantize_model"
+            )
 
         self._feat_extractor = feat_extractor
         self._warmup()
@@ -293,25 +233,23 @@ class S2VSBackend(EmbeddingBackend):
         Returns:
             L2-normalized descriptor of shape (dim,).
         """
-        _, descriptor = self.extract_all(video_tensor)
-        return descriptor
+        return self.extract_all(video_tensor).descriptor
 
     @torch.no_grad()
-    def extract_all(
-        self, video_tensor: torch.Tensor
-    ) -> tuple[torch.Tensor, np.ndarray]:
+    def extract_all(self, video_tensor: torch.Tensor) -> VideoFeatures:
         """Extract both raw features and pooled descriptor in one pass.
 
         Args:
             video_tensor: Tensor of shape (T, C, H, W) — raw video frames.
 
         Returns:
-            Tuple of (raw_features (T, R, D) on CPU, L2-normalized descriptor (dim,)).
+            VideoFeatures with frame_features (T, R, D) on CPU and
+            L2-normalized descriptor of shape (dim,).
         """
         region_features = self.extract_features(video_tensor)  # (T, R, D)
         attended, _weights = self._attention(region_features.to(self._device))
         descriptor = self._pool_features(attended)
-        return region_features, descriptor
+        return VideoFeatures(frame_features=region_features, descriptor=descriptor)
 
     @torch.no_grad()
     def extract_batch(self, video_tensors: list[torch.Tensor]) -> np.ndarray:
@@ -328,118 +266,3 @@ class S2VSBackend(EmbeddingBackend):
             desc = self.extract_descriptor(video_tensor)
             descriptors.append(desc)
         return np.stack(descriptors, axis=0)
-
-
-class CLIPBackend(EmbeddingBackend):
-    """CLIP-based embedding backend (optional).
-
-    Pipeline:
-        Frames -> CLIP ViT-B/32 image encoder -> (T, 512)
-        -> Mean pooling across frames -> (512,)
-        -> L2 normalize
-
-    Requires: pip install open-clip-torch
-    """
-
-    def __init__(
-        self,
-        model_name: str = "ViT-B-32",
-        pretrained: str = "openai",
-        device: str = "cuda",
-        batch_sz: int = 256,
-    ) -> None:
-        try:
-            import open_clip
-        except ImportError:
-            raise ImportError(
-                "CLIP backend requires open-clip-torch. "
-                "Install with: pip install open-clip-torch"
-            ) from None
-
-        self._device = device
-        self._batch_sz = batch_sz
-
-        model, _, self._preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained
-        )
-        self._model = model.to(device).eval()
-        self._dims = model.visual.output_dim
-
-    @property
-    def dim(self) -> int:
-        return self._dims
-
-    @torch.no_grad()
-    def extract_descriptor(self, video_tensor: torch.Tensor) -> np.ndarray:
-        """Extract descriptor from video frames using CLIP.
-
-        Args:
-            video_tensor: Tensor of shape (T, C, H, W) — preprocessed video frames.
-
-        Returns:
-            L2-normalized descriptor of shape (dim,).
-        """
-        frame_features_list: list[torch.Tensor] = []
-        for i in range(0, video_tensor.shape[0], self._batch_sz):
-            batch = video_tensor[i : i + self._batch_sz].to(self._device)
-            feats = self._model.encode_image(batch)  # (B, D)
-            frame_features_list.append(feats)
-        frame_features = torch.cat(frame_features_list, dim=0)  # (T, D)
-
-        # Mean pooling across frames
-        video_descriptor = frame_features.mean(dim=0)  # (D,)
-
-        # L2 normalize
-        video_descriptor = F.normalize(video_descriptor.float(), p=2, dim=0)
-
-        return video_descriptor.cpu().numpy()
-
-    @torch.no_grad()
-    def extract_batch(self, video_tensors: list[torch.Tensor]) -> np.ndarray:
-        """Extract descriptors for multiple videos.
-
-        Args:
-            video_tensors: List of tensors, each of shape (T_i, C, H, W).
-
-        Returns:
-            L2-normalized descriptors of shape (B, dim).
-        """
-        descriptors: list[np.ndarray] = []
-        for video_tensor in video_tensors:
-            desc = self.extract_descriptor(video_tensor)
-            descriptors.append(desc)
-        return np.stack(descriptors, axis=0)
-
-
-def get_backend(
-    name: str = "s2vs",
-    model_path: str | None = None,
-    pretrained: str = "s2vs_dns",
-    device: str = "cuda",
-    **kwargs: Any,
-) -> EmbeddingBackend:
-    """Factory function to create an embedding backend.
-
-    Args:
-        name: Backend name — 's2vs' (default) or 'clip'.
-        model_path: Path to model checkpoint (S2VS only). If None, uses hub weights.
-        pretrained: Pretrained model name for hub loading (S2VS: 's2vs_dns'/'s2vs_vcdb').
-        device: Torch device string.
-        **kwargs: Additional keyword arguments passed to the backend constructor.
-
-    Returns:
-        Configured EmbeddingBackend instance.
-
-    Raises:
-        ValueError: If backend name is not recognized.
-    """
-    if name == "s2vs":
-        if model_path is not None:
-            return S2VSBackend.from_pretrained(
-                model_path=model_path, device=device, **kwargs
-            )
-        return S2VSBackend.from_hub(pretrained=pretrained, device=device, **kwargs)
-    elif name == "clip":
-        return CLIPBackend(device=device, **kwargs)
-    else:
-        raise ValueError(f"Unknown backend: {name!r}. Choose 's2vs' or 'clip'.")
