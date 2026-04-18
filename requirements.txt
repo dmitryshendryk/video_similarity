@@ -16,3 +16,10 @@ typer
 tensorboard
 seaborn
 imageio
+faiss-cpu
+fastapi
+uvicorn[standard]
+python-multipart
+# Optional: pip install open-clip-torch  (for CLIP embedding backend)
+# Optional: pip install vpdq             (for perceptual hash pre-filter)
+# Optional: pip install qdrant-client    (for Qdrant vector database backend)
