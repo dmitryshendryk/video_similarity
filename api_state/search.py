@@ -93,10 +93,51 @@ def run_search_pipeline(
     """Full two-stage search: vector search + ViSiL re-ranking with timing."""
     t0 = time.perf_counter()
 
+    # pHash pre-filter runs BEFORE video decode and descriptor extraction.
+    t_phash = 0.0
+    phash_matches: list[tuple[str, float]] = []
+    phash_skip = bool(config.get("phash_skip_cnn", False))
+    if phash_filter is not None and len(phash_filter) > 0:
+        try:
+            tp0 = time.perf_counter()
+            query_phash = phash_filter.compute_phash(str(video_path))
+            phash_matches = phash_filter.find_matches(query_phash, max_distance=5)
+            t_phash = time.perf_counter() - tp0
+            logger.info("pHash: %.4fs, %d matches", t_phash, len(phash_matches))
+        except Exception as exc:
+            logger.warning("pHash pre-filter failed: %s", exc)
+
+    # If phash_skip_cnn=True and pHash matches exist, return immediately without CNN.
+    if phash_skip and phash_matches:
+        t_total = time.perf_counter() - t0
+        matches_skip: list[dict[str, str | float | bool | None]] = []
+        for vid, score in phash_matches:
+            if score >= threshold:
+                entry = get_video_metadata(vid)
+                entry["score"] = round(float(score), 4)
+                entry["phash_only"] = True
+                matches_skip.append(entry)
+        return {
+            "total_results": len(matches_skip),
+            "threshold": threshold,
+            "timing": {
+                "total_s": round(t_total, 3),
+                "decode_s": 0.0,
+                "descriptor_s": 0.0,
+                "vector_search_s": 0.0,
+                "phash_s": round(t_phash, 4),
+                "visil_rerank_s": 0.0,
+                "frames": 0,
+                "candidates": len(phash_matches),
+            },
+            "results": matches_skip,
+        }
+
+    # Normal CNN pipeline: decode, extract descriptor, vector search, ViSiL.
     video_tensor = load_video_tensor(video_path, keyframes_only=True)
     if video_tensor.shape[0] == 0:
         raise ValueError("Could not extract frames")
-    t_decode = time.perf_counter() - t0
+    t_decode = time.perf_counter() - t0 - t_phash
     logger.info("Decode: %.2fs (%d frames)", t_decode, video_tensor.shape[0])
 
     # Metadata filter
@@ -130,60 +171,16 @@ def run_search_pipeline(
     pre_threshold = threshold * 0.5
     candidates = [(vid, s) for vid, s in stage1_results if s >= pre_threshold]
 
-    # pHash candidate augmentation: add near-exact duplicates to candidate set.
-    t_phash = 0.0
-    phash_video_ids: set[str] = set()
-    phash_skip = bool(config.get("phash_skip_cnn", False))
-    if phash_filter is not None and len(phash_filter) > 0:
-        try:
-            tp0 = time.perf_counter()
-            query_phash = phash_filter.compute_hash(str(video_path))
-            phash_matches = phash_filter.find_matches(query_phash, max_distance=5)
-            t_phash = time.perf_counter() - tp0
-            existing_ids = {vid for vid, _ in candidates}
-            for vid, phash_score in phash_matches:
-                phash_video_ids.add(vid)
-                if vid not in existing_ids:
-                    candidates.append((vid, phash_score))
-            logger.info(
-                "pHash: %.4fs, %d matches (new candidates: %d)",
-                t_phash,
-                len(phash_matches),
-                len(phash_video_ids - existing_ids),
-            )
-        except Exception as exc:
-            logger.warning("pHash augmentation failed: %s", exc)
-
-    # If phash_skip_cnn is True and there are pHash matches, return them directly.
-    if phash_skip and phash_video_ids:
-        phash_results: list[tuple[str, float]] = [
-            (vid, s)
-            for vid, s in candidates
-            if vid in phash_video_ids and s >= threshold
-        ]
-        phash_results.sort(key=lambda x: x[1], reverse=True)
-        t_total = time.perf_counter() - t0
-        matches_skip: list[dict[str, str | float | bool | None]] = []
-        for vid, score in phash_results:
-            entry = get_video_metadata(vid)
-            entry["score"] = round(float(score), 4)
-            entry["phash_only"] = True
-            matches_skip.append(entry)
-        return {
-            "total_results": len(matches_skip),
-            "threshold": threshold,
-            "timing": {
-                "total_s": round(t_total, 3),
-                "decode_s": round(t_decode, 3),
-                "descriptor_s": round(t_descriptor, 3),
-                "vector_search_s": round(t_search, 4),
-                "phash_s": round(t_phash, 4),
-                "visil_rerank_s": 0.0,
-                "frames": video_tensor.shape[0],
-                "candidates": len(candidates),
-            },
-            "results": matches_skip,
-        }
+    # Merge pHash matches into candidate set (for CNN re-ranking).
+    if phash_matches:
+        existing_ids = {vid for vid, _ in candidates}
+        for vid, phash_score in phash_matches:
+            if vid not in existing_ids:
+                candidates.append((vid, phash_score))
+        logger.info(
+            "pHash merged %d new candidates into Stage 1 set",
+            sum(1 for vid, _ in phash_matches if vid not in existing_ids),
+        )
 
     # Stage 2: ViSiL re-ranking
     t_visil = 0.0
@@ -213,18 +210,24 @@ def run_search_pipeline(
 
     t_total = time.perf_counter() - t0
     logger.info(
-        "Total: %.2fs (decode=%.2f, desc=%.2f, search=%.4f, visil=%.2f)",
+        "Total: %.2fs (phash=%.4f, decode=%.2f, desc=%.2f, search=%.4f, visil=%.2f)",
         t_total,
+        t_phash,
         t_decode,
         t_descriptor,
         t_search,
         t_visil,
     )
 
-    matches: list[dict[str, str | float | None]] = []
+    # Build result dicts, flagging pHash-only matches.
+    phash_ids = {vid for vid, _ in phash_matches}
+    cnn_ids = {vid for vid, _ in stage1_results}
+    matches: list[dict[str, str | float | bool | None]] = []
     for vid, score in final_results:
         entry = get_video_metadata(vid)
         entry["score"] = round(float(score), 4)
+        if vid in phash_ids and vid not in cnn_ids:
+            entry["phash_only"] = True
         matches.append(entry)
 
     return {
@@ -235,6 +238,7 @@ def run_search_pipeline(
             "decode_s": round(t_decode, 3),
             "descriptor_s": round(t_descriptor, 3),
             "vector_search_s": round(t_search, 4),
+            "phash_s": round(t_phash, 4),
             "visil_rerank_s": round(t_visil, 3),
             "frames": video_tensor.shape[0],
             "candidates": len(candidates),

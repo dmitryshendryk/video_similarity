@@ -101,7 +101,7 @@ def _process_upload(
 
     if phash_filter is not None:
         try:
-            phash_value = phash_filter.compute_hash(str(video_path))
+            phash_value = phash_filter.compute_phash(str(video_path))
             metadata["phash"] = str(hex(phash_value))[2:]
             phash_filter.add(video_id, phash_value)
         except Exception as exc:

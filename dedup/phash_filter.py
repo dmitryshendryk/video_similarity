@@ -47,7 +47,7 @@ class PHashFilter:
         """Return True if imagehash and Pillow are importable."""
         return _IMAGEHASH_AVAILABLE
 
-    def compute_hash(self, video_path: str | Path) -> int:
+    def compute_phash(self, video_path: str | Path) -> int:
         """Compute a 64-bit pHash from a representative frame at 10% duration.
 
         Extracts a single frame via FFmpeg/ffprobe at 10 % of the video's
