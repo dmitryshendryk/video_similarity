@@ -40,6 +40,7 @@ from api_state import (
     index,
     index_path,
     metadata_path,
+    phash_filter,
     run_search_pipeline,
     save_config,
     save_features,
@@ -97,6 +98,14 @@ def _process_upload(
         int(metadata["height"]) if metadata.get("height") is not None else None,
     )
     generate_thumbnail(video_path, video_id)
+
+    if phash_filter is not None:
+        try:
+            phash_value = phash_filter.compute_hash(str(video_path))
+            metadata["phash"] = str(hex(phash_value))[2:]
+            phash_filter.add(video_id, phash_value)
+        except Exception as exc:
+            logger.warning("pHash computation failed for %s: %s", video_id, exc)
 
     video_tensor = load_video_tensor(video_path)
     if video_tensor.shape[0] == 0:
@@ -230,6 +239,9 @@ def delete_video(video_id: str) -> dict[str, str]:
     index.remove(video_id)
     delete_features(video_id)
 
+    if phash_filter is not None and video_id in phash_filter:
+        phash_filter.remove(video_id)
+
     if not isinstance(index, QdrantIndex):
         if video_id in store:
             store.remove(video_id)
@@ -251,6 +263,8 @@ def delete_all_videos() -> dict[str, int]:
     for video_id in all_ids:
         index.remove(video_id)
         delete_features(video_id)
+        if phash_filter is not None and video_id in phash_filter:
+            phash_filter.remove(video_id)
         if not isinstance(index, QdrantIndex):
             if video_id in store:
                 store.remove(video_id)

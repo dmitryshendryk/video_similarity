@@ -10,7 +10,7 @@ from pathlib import Path
 
 from api_state.cache import get_cached_descriptors
 from api_state.config import THUMBNAILS_DIR, config
-from api_state.state import embed_backend, index, store
+from api_state.state import embed_backend, index, phash_filter, store
 from api_state.visil import rerank_visil
 from dedup.helpers import (
     aspect_ratio_class,
@@ -129,6 +129,61 @@ def run_search_pipeline(
 
     pre_threshold = threshold * 0.5
     candidates = [(vid, s) for vid, s in stage1_results if s >= pre_threshold]
+
+    # pHash candidate augmentation: add near-exact duplicates to candidate set.
+    t_phash = 0.0
+    phash_video_ids: set[str] = set()
+    phash_skip = bool(config.get("phash_skip_cnn", False))
+    if phash_filter is not None and len(phash_filter) > 0:
+        try:
+            tp0 = time.perf_counter()
+            query_phash = phash_filter.compute_hash(str(video_path))
+            phash_matches = phash_filter.find_matches(query_phash, max_distance=5)
+            t_phash = time.perf_counter() - tp0
+            existing_ids = {vid for vid, _ in candidates}
+            for vid, phash_score in phash_matches:
+                phash_video_ids.add(vid)
+                if vid not in existing_ids:
+                    candidates.append((vid, phash_score))
+            logger.info(
+                "pHash: %.4fs, %d matches (new candidates: %d)",
+                t_phash,
+                len(phash_matches),
+                len(phash_video_ids - existing_ids),
+            )
+        except Exception as exc:
+            logger.warning("pHash augmentation failed: %s", exc)
+
+    # If phash_skip_cnn is True and there are pHash matches, return them directly.
+    if phash_skip and phash_video_ids:
+        phash_results: list[tuple[str, float]] = [
+            (vid, s)
+            for vid, s in candidates
+            if vid in phash_video_ids and s >= threshold
+        ]
+        phash_results.sort(key=lambda x: x[1], reverse=True)
+        t_total = time.perf_counter() - t0
+        matches_skip: list[dict[str, str | float | bool | None]] = []
+        for vid, score in phash_results:
+            entry = get_video_metadata(vid)
+            entry["score"] = round(float(score), 4)
+            entry["phash_only"] = True
+            matches_skip.append(entry)
+        return {
+            "total_results": len(matches_skip),
+            "threshold": threshold,
+            "timing": {
+                "total_s": round(t_total, 3),
+                "decode_s": round(t_decode, 3),
+                "descriptor_s": round(t_descriptor, 3),
+                "vector_search_s": round(t_search, 4),
+                "phash_s": round(t_phash, 4),
+                "visil_rerank_s": 0.0,
+                "frames": video_tensor.shape[0],
+                "candidates": len(candidates),
+            },
+            "results": matches_skip,
+        }
 
     # Stage 2: ViSiL re-ranking
     t_visil = 0.0
