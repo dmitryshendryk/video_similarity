@@ -88,3 +88,18 @@ def get_cached_descriptors(
         _descriptor_cache.pop(next(iter(_descriptor_cache)))
     _descriptor_cache[fhash] = cached
     return cached
+
+
+def clear_descriptor_cache() -> int:
+    """Clear both in-memory and disk descriptor caches.
+
+    Returns:
+        Number of disk cache files removed.
+    """
+    _descriptor_cache.clear()
+    removed = 0
+    for f in CACHE_DIR.glob("*.npz"):
+        f.unlink(missing_ok=True)
+        removed += 1
+    logger.info("Descriptor cache cleared (%d disk files removed)", removed)
+    return removed

@@ -22,16 +22,19 @@ for _d in [UPLOADS_DIR, THUMBNAILS_DIR, INDEX_DIR, CACHE_DIR]:
 
 # --- Default config ---
 DEFAULT_CONFIG: dict[str, str | int | float | bool | None] = {
-    "index_backend": "faiss",
+    "index_backend": "qdrant",
     "embedding_backend": "s2vs",
     "pretrained": "s2vs_dns",
     "device": "cuda" if torch.cuda.is_available() else "cpu",
-    "qdrant_url": None,
+    "qdrant_url": "http://localhost:6333",
     "collection_name": "video_dedup",
-    "threshold": 0.8,
-    "top_k": 50,
-    "qdrant_binary_quantization": False,
-    "phash_skip_cnn": False,
+    "threshold": 0.5,
+    "top_k": 20,
+    "qdrant_binary_quantization": True,
+    "phash_skip_cnn": True,
+    "compile_model": True,
+    "quantize_model": True,
+    "batch_sz": 256,
 }
 
 

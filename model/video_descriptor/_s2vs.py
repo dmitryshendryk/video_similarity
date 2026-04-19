@@ -65,7 +65,9 @@ class S2VSBackend(EmbeddingBackend):
 
         if compile_model and not quantize_model:
             try:
-                feat_extractor = torch.compile(feat_extractor, mode="reduce-overhead")
+                mode = "reduce-overhead" if device != "cpu" else "default"
+                feat_extractor = torch.compile(feat_extractor, mode=mode)
+                logger.info("torch.compile applied (mode=%s)", mode)
             except Exception as exc:
                 logger.warning("torch.compile failed, using eager mode: %s", exc)
         elif compile_model:

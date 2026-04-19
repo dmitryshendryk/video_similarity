@@ -2,9 +2,13 @@
 ViSiL similarity network and per-frame feature persistence helpers.
 """
 
+import logging
+
 import numpy as np
 import h5py
 import torch
+
+logger = logging.getLogger(__name__)
 
 from api_state.config import FEATURES_HDF5, config
 from api_state.state import embed_backend
@@ -83,11 +87,21 @@ def rerank_visil(
         target_indexed = sim_net.index_video(target)
 
         with torch.no_grad():
-            raw_score = sim_net.calculate_video_similarity(
-                query_indexed, target_indexed
-            )
-            # Normalize from [-1, 1] → [0, 1] to match ViSiL.forward() behavior
-            score = float(raw_score.item()) / 2.0 + 0.5
+            try:
+                # Use similarity_matrix(normalize=True) + v2v_sim to match
+                # ViSiL.forward() which normalizes to [0,1] BEFORE v2v_sim.
+                # calculate_video_similarity() doesn't normalize, producing
+                # systematically lower scores.
+                sim_matrix, sim_mask = sim_net.similarity_matrix(
+                    query_indexed, target_indexed, normalize=True
+                )
+                raw_score = sim_net.v2v_sim(sim_matrix, sim_mask)
+            except RuntimeError:
+                logger.warning(
+                    "ViSiL re-rank skipped for %s (too few frames for pooling)", vid
+                )
+                continue
+            score = float(raw_score.item())
         results.append((vid, score))
 
     results.sort(key=lambda x: x[1], reverse=True)

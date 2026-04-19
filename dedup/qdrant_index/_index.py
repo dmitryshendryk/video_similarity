@@ -326,6 +326,34 @@ class QdrantIndex:
             offset = next_offset
         return video_ids
 
+    def list_page(
+        self, limit: int = 20, offset_id: str | None = None
+    ) -> tuple[list[str], str | None]:
+        """Return one page of video IDs with cursor-based pagination.
+
+        Args:
+            limit: Max IDs to return.
+            offset_id: Qdrant point ID to start after (None for first page).
+
+        Returns:
+            (video_ids, next_offset_id) — next_offset_id is None when exhausted.
+        """
+        results = self._client.scroll(
+            collection_name=self._collection_name,
+            limit=limit,
+            offset=offset_id,
+            with_payload=["video_id"],
+            with_vectors=False,
+        )
+        points, next_offset = results
+        video_ids: list[str] = []
+        for point in points:
+            vid = point.payload.get("video_id", "")
+            if isinstance(vid, str):
+                video_ids.append(vid)
+        next_id = str(next_offset) if next_offset is not None else None
+        return video_ids, next_id
+
     def scroll_all_payloads(self, fields: list[str]) -> list[dict[str, MetadataValue]]:
         """Scroll all points and return the requested payload fields.
 

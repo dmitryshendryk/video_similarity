@@ -20,6 +20,9 @@ embed_backend = get_backend(
     name=str(config.get("embedding_backend", "s2vs")),
     pretrained=str(config.get("pretrained", "s2vs_dns")),
     device=str(config.get("device", "cpu")),
+    compile_model=bool(config.get("compile_model", True)),
+    quantize_model=bool(config.get("quantize_model", False)),
+    batch_sz=int(config.get("batch_sz", 256)),
 )
 
 index_path = INDEX_DIR / "dedup_index"

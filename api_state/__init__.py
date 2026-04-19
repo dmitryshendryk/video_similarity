@@ -21,5 +21,6 @@ from api_state.state import (
     phash_filter,
     store,
 )
+from api_state.cache import clear_descriptor_cache
 from api_state.thumbnails import generate_thumbnail
 from api_state.visil import delete_features, save_features

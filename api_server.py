@@ -11,6 +11,7 @@ Usage:
 import logging
 import uuid
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 logger = logging.getLogger("api_server")
@@ -19,6 +20,7 @@ logging.basicConfig(level=logging.INFO)
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from dedup.helpers import (
     aspect_ratio_class,
@@ -33,6 +35,7 @@ from model.video_descriptor import S2VSBackend
 from api_state import (
     THUMBNAILS_DIR,
     UPLOADS_DIR,
+    clear_descriptor_cache,
     config,
     delete_features,
     embed_backend,
@@ -146,7 +149,10 @@ async def upload_video(
         f.write(content)
 
     try:
-        return _process_upload(video_path, video_id, file.filename)
+        result = await run_in_threadpool(
+            _process_upload, video_path, video_id, file.filename
+        )
+        return result
     except (ValueError, Exception) as exc:
         video_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -220,10 +226,25 @@ async def search_duplicates(
 
 
 @app.get("/api/videos")
-def list_videos() -> dict[str, object]:
-    all_ids = index.list_all()
-    videos = [get_video_metadata(vid) for vid in all_ids]
-    return {"total": len(videos), "videos": videos}
+def list_videos(
+    limit: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+) -> dict[str, object]:
+    if isinstance(index, QdrantIndex):
+        ids, next_cursor = index.list_page(limit=limit, offset_id=cursor)
+    else:
+        all_ids = index.list_all()
+        start = 0
+        if cursor is not None:
+            try:
+                start = int(cursor)
+            except ValueError:
+                start = 0
+        ids = all_ids[start : start + limit]
+        next_cursor = str(start + limit) if start + limit < len(all_ids) else None
+    videos = [get_video_metadata(vid) for vid in ids]
+    total = len(index)
+    return {"total": total, "videos": videos, "next_cursor": next_cursor}
 
 
 @app.get("/api/videos/{video_id}")
@@ -289,3 +310,9 @@ def get_thumbnail(video_id: str) -> FileResponse:
     if not thumb.exists():
         raise HTTPException(status_code=404, detail="Thumbnail not found")
     return FileResponse(thumb, media_type="image/jpeg")
+
+
+@app.delete("/api/cache")
+def clear_cache() -> dict[str, int]:
+    removed = clear_descriptor_cache()
+    return {"cleared": removed}
