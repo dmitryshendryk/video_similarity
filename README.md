@@ -10,14 +10,70 @@ employed video datasets, and pre-trained models are provided.
 </p>
 
 ## Prerequisites
-* Python 3
+* Python 3.12
 * PyTorch
 * Torchvision
 * FFMpeg
+* Docker (for Qdrant vector database)
+* [Bun](https://bun.sh) or Node.js (for frontend)
+
+## Quick Start
+
+### 1. Start Qdrant
+
+The application uses [Qdrant](https://qdrant.tech/) as the vector database for video descriptor search. Run it via Docker:
+
+```bash
+docker run -d --name qdrant -p 6333:6333 -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant
+```
+
+This stores data in `./qdrant_storage` so it persists across restarts.
+
+### 2. Install dependencies
+
+```bash
+./setup.sh
+```
+
+This will:
+- Create a `.venv` with Python 3.12
+- Install PyTorch, all Python dependencies, and optional packages (`qdrant-client`, `optimum-quanto`)
+- Install frontend dependencies (via `bun` or `npm`)
+
+### 3. Run the application
+
+```bash
+./run.sh
+```
+
+This starts:
+- **Backend** at http://localhost:8000 (FastAPI + uvicorn)
+- **Frontend** at http://localhost:3000 (Vite + React)
+
+Press `Ctrl+C` to stop both.
+
+### Manual setup (alternative)
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install torch torchvision
+pip install -r requirements.txt
+pip install qdrant-client optimum-quanto
+cd web-ui && bun install && cd ..
+```
+
+Run manually:
+```bash
+source .venv/bin/activate
+export KMP_DUPLICATE_LIB_OK=TRUE
+uvicorn api_server:app --port 8000 &
+cd web-ui && bun run dev &
+```
 
 ## Preparation
 
-### Installation
+### Installation (legacy)
 
 * Clone this repo
 ```bash

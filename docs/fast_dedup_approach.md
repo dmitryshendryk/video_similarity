@@ -103,9 +103,54 @@ query:
            → threshold filter → duplicate report (JSON)
 ```
 
+## Lessons from czkawka (Rust video dedup tool)
+
+The [czkawka](https://github.com/qarmin/czkawka) project is a mature Rust-based duplicate finder that includes video deduplication. Analyzing its approach reveals several ideas worth incorporating:
+
+### Ideas adopted into our pipeline
+
+1. **Parameter-keyed cache files** — czkawka names its cache files with the hashing parameters embedded: `cache_similar_videos_v3__skip_15__dur_10__cd_letterbox.bin`. This means changing parameters (e.g., skip amount) automatically invalidates the cache without manual cleanup. We should do the same for our descriptor cache — include the backend name, model checkpoint hash, and pooling strategy in the cache filename.
+
+2. **Video metadata extraction alongside hashing** — czkawka extracts fps, codec, bitrate, resolution, and duration for every video during the hashing pass (`VideosEntry` struct). This metadata is used for post-filtering (exclude same-size, exclude same-resolution) and for choosing which duplicate to keep (highest bitrate/resolution wins). Our `MetadataStore` should capture the same fields during `build_index`.
+
+3. **Crop detection modes** — czkawka supports three crop detection modes via `vid_dup_finder_lib`: `None`, `Letterbox` (detect and ignore black bars), and `Motion` (detect active region). Letterbox detection is valuable for video dedup since the same content can appear with different letterboxing. We should add a preprocessing step that optionally detects and crops letterbox bars before frame extraction.
+
+4. **Configurable temporal sampling window** — Instead of processing the entire video, czkawka skips the first N seconds (default 15, range 0-300) then hashes only M seconds (default 10, range 2-60). This dramatically reduces processing time for long videos. Our pipeline should support `--skip_start` and `--max_duration` parameters for the same optimization.
+
+5. **Parallelism with bounded concurrency** — czkawka uses `rayon::par_iter().with_max_len(2)` to limit parallel video hashing to 2 concurrent videos. This prevents FFmpeg/GPU memory exhaustion. Our batch descriptor extraction should similarly cap concurrent video processing.
+
+6. **Reference folder mode** — czkawka supports a "reference folders" concept where one set of folders contains the "known good" originals and another contains potential duplicates. Results are grouped as (reference, [duplicates]) rather than flat groups. This is directly useful for our use case: the existing 10K videos are the reference set, new videos are checked against them.
+
+7. **Thumbnail generation for review** — czkawka generates thumbnails (single frame or NxN grid) for each duplicate group to help users visually verify matches before deletion. Our pipeline should optionally generate comparison thumbnails for the final results.
+
+### What czkawka does differently (and why we diverge)
+
+| Aspect | czkawka | Our approach | Why we diverge |
+|--------|---------|-------------|---------------|
+| Hash type | DCT perceptual hash (via `vid_dup_finder_lib`) | S2VS deep features + FAISS | Deep features capture semantic similarity, not just perceptual; handles different recordings of same event |
+| Matching | `vid_dup_finder_lib::search()` — connected components on hash similarity | FAISS ANN + optional ViSiL rerank | FAISS scales to 100K+ with sub-ms queries; ViSiL provides frame-level precision |
+| Temporal scope | Fixed window (skip N, hash M seconds) | Full video by default, configurable window | Full video captures more context; window mode available as speed optimization |
+| Storage | Binary cache on local filesystem | HDF5 descriptors + FAISS index + JSON metadata | HDF5 is standard for ML; FAISS index enables instant search |
+
+### Updated pipeline parameters (inspired by czkawka)
+
+```
+fast_dedup.py
+  # ... existing parameters ...
+  --skip_start 0         Skip first N seconds of each video (default: 0, czkawka default: 15)
+  --max_duration 0       Max seconds to process per video, 0=full (default: 0, czkawka default: 10)
+  --crop_detect none     Crop detection: none|letterbox (default: none)
+  --exclude_same_size    Skip pairs with identical file size
+  --exclude_same_res     Skip pairs with identical resolution
+  --reference_path PATH  Reference folder (known originals); only report new duplicates
+  --thumbnails           Generate comparison thumbnails for results
+```
+
 ## Key Design Principles
 
 1. **Reuse over reinvent** — The embedding pipeline reuses the existing S2VS feature extractor, attention layer, and pooling modules. Only the aggregation (mean pool across time) and indexing (FAISS) are new.
 2. **Pluggable backends** — Abstract `EmbeddingBackend` interface allows swapping S2VS ↔ CLIP without changing the rest of the pipeline. Same for `MetadataStore` (JSON ↔ PostgreSQL).
 3. **Graceful degradation** — vpdq and CLIP are optional imports. The core pipeline (S2VS + FAISS) works with only `faiss-cpu` as a new dependency.
 4. **Accuracy when needed** — The optional ViSiL re-ranking stage preserves the original model's accuracy for the final ranking, applied only to a small candidate set.
+5. **Parameter-aware caching** — Cache filenames encode the parameters used to generate them, so changing settings auto-invalidates stale caches (learned from czkawka).
+6. **Bounded parallelism** — Cap concurrent video processing to prevent memory exhaustion during batch extraction (learned from czkawka).
