@@ -32,8 +32,8 @@ DEFAULT_CONFIG: dict[str, str | int | float | bool | None] = {
     "top_k": 20,
     "qdrant_binary_quantization": True,
     "phash_skip_cnn": True,
-    "compile_model": True,
-    "quantize_model": True,
+    "compile_model": False,
+    "quantize_model": False,
     "batch_sz": 256,
 }
 

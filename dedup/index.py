@@ -6,10 +6,17 @@ At 10K scale, exact search is fast enough (<1ms) that IVF adds complexity with n
 """
 
 import json
-import faiss
+
 import numpy as np
 
 from pathlib import Path
+
+
+def _get_faiss():
+    """Lazy import of faiss to avoid loading it when using Qdrant."""
+    import faiss
+
+    return faiss
 
 
 class VideoIndex:
@@ -17,7 +24,7 @@ class VideoIndex:
 
     def __init__(self, dim: int = 512) -> None:
         self._dim = dim
-        self._index = faiss.IndexFlatIP(dim)
+        self._index = _get_faiss().IndexFlatIP(dim)
         self._ids: list[str] = []
         self._id_to_pos: dict[str, int] = {}
 
@@ -95,7 +102,7 @@ class VideoIndex:
         kept_vecs = all_vecs[keep_mask]
         kept_ids = [vid for vid in self._ids if vid != video_id]
 
-        self._index = faiss.IndexFlatIP(self._dim)
+        self._index = _get_faiss().IndexFlatIP(self._dim)
         self._ids = []
         self._id_to_pos = {}
 
@@ -113,7 +120,7 @@ class VideoIndex:
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        faiss.write_index(self._index, str(path.with_suffix(".faiss")))
+        _get_faiss().write_index(self._index, str(path.with_suffix(".faiss")))
         with open(path.with_suffix(".json"), "w") as f:
             json.dump({"ids": self._ids, "dim": self._dim}, f)
 
@@ -132,7 +139,7 @@ class VideoIndex:
             meta = json.load(f)
 
         idx = cls(dim=meta["dim"])
-        idx._index = faiss.read_index(str(path.with_suffix(".faiss")))
+        idx._index = _get_faiss().read_index(str(path.with_suffix(".faiss")))
         idx._ids = meta["ids"]
         idx._id_to_pos = {vid: i for i, vid in enumerate(idx._ids)}
         return idx
